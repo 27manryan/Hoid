@@ -3617,7 +3617,10 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
 
     sources: List[SkillSource] = [
         OptionalSkillSource(),        # Official optional skills (highest priority)
-        HermesIndexSource(auth=auth), # Centralized index (search + resolved install paths)
+        # HOID-MOD #1: HermesIndexSource removed from the router. It hit
+        # hermes-agent.nousresearch.com on every `hermes skills` invocation
+        # with no config kill-switch. The class def is left in place (now
+        # dead, never instantiated) to minimize upstream merge surface.
         SkillsShSource(auth=auth),
         WellKnownSkillSource(),
         UrlSource(),                  # Direct HTTP(S) URL to a SKILL.md file
