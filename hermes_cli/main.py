@@ -2016,16 +2016,11 @@ def cmd_chat(args):
         print("You can run 'hermes setup' at any time to configure.")
         sys.exit(1)
 
-    # Start update check in background (runs while other init happens).
-    # On Termux this imports rich/prompt_toolkit in the foreground and then
-    # competes for CPU on single-core devices, so keep it opt-in there.
-    if _termux_should_prefetch_update_check():
-        try:
-            from hermes_cli.banner import prefetch_update_check
-
-            prefetch_update_check()
-        except Exception:
-            pass
+    # HOID-MOD #2: launch-time update-check trigger removed. It was already
+    # Termux-gated (dead on macOS), and the actual egress is neutered at the
+    # banner network leaves (HOID-MOD #3). The _termux_should_prefetch_update_check
+    # helper at the top of this module is left in place (now dead) to minimize
+    # upstream merge surface.
 
     # Sync bundled skills on every CLI launch (fast -- skips unchanged skills)
     try:
