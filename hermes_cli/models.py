@@ -2709,14 +2709,40 @@ def _fetch_anthropic_models(
     if not token:
         return None
 
-    headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
-    is_oauth = _is_oauth_token(token)
-    if is_oauth:
-        headers["Authorization"] = f"Bearer {token}"
-        from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
-        headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
-    else:
-        headers["x-api-key"] = token
+    def _headers_for_token(candidate: str) -> tuple[dict[str, str], bool]:
+        headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
+        is_oauth_candidate = _is_oauth_token(candidate)
+        if is_oauth_candidate:
+            headers["Authorization"] = f"Bearer {candidate}"
+            from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS
+            headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
+        else:
+            headers["x-api-key"] = candidate
+        return headers, is_oauth_candidate
+
+    headers, is_oauth = _headers_for_token(token)
+
+    def _api_key_retry_after_oauth_auth_error(http_err: urllib.error.HTTPError):
+        """Retry native Anthropic model discovery with ANTHROPIC_API_KEY.
+
+        resolve_anthropic_token() deliberately prefers refreshable OAuth for
+        runtime calls, but picker discovery should not fall back to the stale
+        static model list when that OAuth token has expired and a valid Console
+        API key is present in the profile env.
+        """
+        if not is_oauth or http_err.code not in {401, 403} or api_key or base_url:
+            return None
+        env_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not env_key:
+            try:
+                from hermes_cli.config import get_env_value
+                env_key = (get_env_value("ANTHROPIC_API_KEY") or "").strip()
+            except Exception:
+                env_key = ""
+        if not env_key or env_key == token:
+            return None
+        retry_headers, _ = _headers_for_token(env_key)
+        return _do_request(retry_headers)
 
     def _do_request(h: dict[str, str]):
         req = urllib.request.Request(
@@ -2743,15 +2769,25 @@ def _fetch_anthropic_models(
                 except Exception:
                     body_text = ""
                 if "long context beta" in body_text and "not yet available" in body_text:
+                    from agent.anthropic_adapter import _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
                     headers["anthropic-beta"] = ",".join(
                         [b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA]
                         + list(_OAUTH_ONLY_BETAS)
                     )
-                    data = _do_request(headers)
+                    try:
+                        data = _do_request(headers)
+                    except urllib.error.HTTPError as retry_err:
+                        data = _api_key_retry_after_oauth_auth_error(retry_err)
+                        if data is None:
+                            raise
                 else:
-                    raise
+                    data = _api_key_retry_after_oauth_auth_error(http_err)
+                    if data is None:
+                        raise
             else:
-                raise
+                data = _api_key_retry_after_oauth_auth_error(http_err)
+                if data is None:
+                    raise
         models = [m["id"] for m in data.get("data", []) if m.get("id")]
         # Sort: latest/largest first (opus > sonnet > haiku, higher version first)
         return sorted(models, key=lambda m: (

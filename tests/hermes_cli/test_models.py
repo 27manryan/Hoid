@@ -1,5 +1,8 @@
 """Tests for the hermes_cli models module."""
 
+import email.message
+import io
+import urllib.error
 from unittest.mock import patch, MagicMock
 
 from hermes_cli.nous_account import NousPortalAccountInfo
@@ -86,6 +89,7 @@ class TestFetchOpenRouterModels:
 
         assert models == OPENROUTER_MODELS
 
+
     def test_filters_out_models_without_tool_support(self, monkeypatch):
         """Models whose supported_parameters omits 'tools' must not appear in the picker.
 
@@ -166,6 +170,60 @@ class TestFetchOpenRouterModels:
         ids = [mid for mid, _ in models]
         assert "anthropic/claude-opus-4.8" in ids
         assert "qwen/qwen3.7-max" in ids
+
+
+class TestFetchAnthropicModels:
+    def _fetch_after_oauth_401(self):
+        from hermes_cli.models import _fetch_anthropic_models
+
+        calls = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"data":[{"id":"claude-sonnet-5"}]}'
+
+        def _urlopen(req, timeout):
+            calls.append(req)
+            if len(calls) == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url,
+                    401,
+                    "Unauthorized",
+                    email.message.Message(),
+                    io.BytesIO(b'{"error":{"message":"Invalid authentication credentials"}}'),
+                )
+            return _Resp()
+
+        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="cc-stale-oauth"), \
+             patch("hermes_cli.models.urllib.request.urlopen", side_effect=_urlopen):
+            return _fetch_anthropic_models(), calls
+
+    def test_oauth_auth_failure_retries_with_env_api_key(self, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-api-key")
+        models, calls = self._fetch_after_oauth_401()
+
+        assert models == ["claude-sonnet-5"]
+        first_headers = dict(calls[0].header_items())
+        second_headers = dict(calls[1].header_items())
+        assert first_headers["Authorization"] == "Bearer cc-stale-oauth"
+        assert second_headers["X-api-key"] == "test-api-key"
+        assert "Authorization" not in second_headers
+
+    def test_oauth_auth_failure_retries_with_profile_env_api_key(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        with patch("hermes_cli.config.get_env_value", return_value="profile-api-key"):
+            models, calls = self._fetch_after_oauth_401()
+
+        assert models == ["claude-sonnet-5"]
+        second_headers = dict(calls[1].header_items())
+        assert second_headers["X-api-key"] == "profile-api-key"
+        assert "Authorization" not in second_headers
 
 
 class TestOpenRouterToolSupportHelper:
