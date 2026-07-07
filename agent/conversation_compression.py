@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Optional, Tuple
 
 from agent.model_metadata import estimate_request_tokens_rough
+from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,166 @@ COMPACTION_STATUS = (
     f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier conversation so I can continue..."
 )
 
+
+def _content_to_text(content: Any, *, limit: int = 4000) -> str:
+    """Best-effort conversion of message content into redacted plain text."""
+    try:
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            parts = []
+            for part in content:
+                if isinstance(part, dict):
+                    if isinstance(part.get("text"), str):
+                        parts.append(part["text"])
+                    elif part.get("type") in {"image_url", "input_image"}:
+                        parts.append("[image]")
+                    elif part.get("type"):
+                        parts.append(f"[{part.get('type')}]")
+                else:
+                    parts.append(str(part))
+            text = "\n".join(parts)
+        else:
+            text = str(content) if content is not None else ""
+        text = redact_sensitive_text(text.strip())
+        if len(text) > limit:
+            return text[: limit - 24].rstrip() + "\n...[truncated]"
+        return text
+    except Exception:
+        return "[unreadable content]"
+
+
+def _resolve_vault_root_for_handoff(agent: Any) -> Optional[Path]:
+    """Find an Athenaeum-style vault root without hardcoded machine paths."""
+    candidates = []
+    cwd = getattr(agent, "cwd", "") or os.getcwd()
+    if cwd:
+        candidates.append(Path(cwd).expanduser())
+    env_root = os.environ.get("ATHENAEUM_ROOT") or os.environ.get("VAULT_ROOT")
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    candidates.append(Path.cwd())
+    for start in candidates:
+        try:
+            for parent in [start.resolve(), *start.resolve().parents]:
+                if (parent / "AGENTS.md").exists() and (parent / "system" / "handoffs").exists():
+                    return parent
+        except Exception:
+            continue
+    return None
+
+
+def _latest_compaction_summary(compressed_messages: list, agent: Any) -> str:
+    """Return the latest structured compression summary body if available."""
+    try:
+        previous = getattr(agent.context_compressor, "_previous_summary", "")
+        if previous:
+            return redact_sensitive_text(str(previous).strip())
+    except Exception:
+        pass
+    for msg in reversed(compressed_messages or []):
+        text = _content_to_text(msg.get("content"), limit=50000)
+        if "## Active Task" in text and "## Critical Context" in text:
+            for prefix in (
+                "[CONTEXT COMPACTION - REFERENCE ONLY]",
+            ):
+                if text.startswith(prefix):
+                    text = text[len(prefix):].lstrip()
+            return redact_sensitive_text(text.strip())
+    return ""
+
+
+def _write_auto_continuity_handoff(
+    agent: Any,
+    messages: list,
+    compressed_messages: list,
+    *,
+    approx_tokens: Optional[int] = None,
+) -> None:
+    """Persist a vault handoff when automatic context compression fires.
+
+    This runs inside the runtime compression path, so it does not require a
+    model turn or extra user prompt when the session is already near the limit.
+    """
+    vault_root = _resolve_vault_root_for_handoff(agent)
+    if vault_root is None:
+        return
+    handoff_dir = vault_root / "system" / "handoffs"
+    try:
+        handoff_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+
+    now = datetime.now()
+    stamp = now.strftime("%y%m%d")
+    session_id = getattr(agent, "session_id", "") or "unknown"
+    safe_sid = "".join(ch for ch in session_id if ch.isalnum() or ch in "-_")[:24] or "unknown"
+    path = handoff_dir / f"{stamp}_summary_hoid-autocontinuity-{safe_sid}.md"
+
+    summary = _latest_compaction_summary(compressed_messages, agent)
+    if not summary:
+        recent = []
+        for msg in (messages or [])[-12:]:
+            role = msg.get("role", "unknown")
+            if role == "tool":
+                continue
+            text = _content_to_text(msg.get("content"), limit=1200)
+            if text:
+                recent.append(f"- {role}: {text}")
+        summary = "## Active Task\nUnknown. Summary generation was unavailable.\n\n## Critical Context\nRecent non-tool messages:\n" + "\n".join(recent)
+
+    context_length = getattr(getattr(agent, "context_compressor", None), "context_length", 0) or 0
+    pct = "unknown"
+    if approx_tokens and context_length:
+        pct = f"{(approx_tokens / context_length) * 100:.1f}%"
+
+    title = ""
+    try:
+        if getattr(agent, "_session_db", None) and session_id:
+            title = agent._session_db.get_session_title(session_id) or ""
+    except Exception:
+        title = ""
+
+    body = f"""---
+created: {now.isoformat(timespec='seconds')}
+updated: {now.isoformat(timespec='seconds')}
+type: summary
+from: hoid
+to: hoid
+status: pending
+auto-execute: false
+reconcile: hoid-dialectic
+task: automatic continuity handoff before context compression
+source: session {session_id}
+---
+<!-- hoid-dialectic-notes -->
+
+## Work completed
+- Automatic continuity handoff created by Hermes before context compression.
+- Session title: {title or 'Untitled'}.
+- Approximate context load at trigger: {pct}.
+- Session id before compression: `{session_id}`.
+
+## Durable memory candidates
+- None.
+
+## Project status changes
+- None.
+
+## Skill candidates
+- None.
+
+## Open loops
+- Review the compaction summary below if this session resumes after context compression.
+
+## Compression summary
+{summary.strip()}
+"""
+    try:
+        path.write_text(body, encoding="utf-8")
+        logger.info("auto-continuity handoff written: %s", path)
+    except Exception as exc:
+        logger.warning("auto-continuity handoff write failed: %s", exc)
 
 def _compression_lock_holder(agent: Any) -> str:
     """Build a unique holder id for the lock: pid:tid:agent-instance:uuid.
@@ -643,6 +804,16 @@ def compress_context(
                         f"({_aux_fail_err or 'unknown error'}). Recovered using main model — "
                         "check auxiliary.compression.model in config.yaml."
                     )
+
+        try:
+            _write_auto_continuity_handoff(
+                agent,
+                messages,
+                compressed,
+                approx_tokens=approx_tokens,
+            )
+        except Exception as _handoff_err:
+            logger.debug("auto-continuity handoff hook failed: %s", _handoff_err)
 
         todo_snapshot = agent._todo_store.format_for_injection()
         if todo_snapshot:
