@@ -22,14 +22,14 @@ def test_hermes_client_tag_format():
     assert "," not in tag
 
 
-def test_nous_portal_tags_contains_product_and_client():
-    """Every Nous Portal request gets BOTH the product tag and the version tag."""
-    from agent.portal_tags import hermes_client_tag, nous_portal_tags
+def test_nous_portal_tags_neutered_no_fingerprint():
+    """HOID-MOD #5: this install attaches NO product/version fingerprint to Nous
+    Portal requests. nous_portal_tags() must return an empty list so no
+    identifying tag leaves at any call site."""
+    from agent.portal_tags import nous_portal_tags
 
     tags = nous_portal_tags()
-    assert "product=hermes-agent" in tags
-    assert hermes_client_tag() in tags
-    assert len(tags) == 2
+    assert tags == [], f"expected no fingerprint tags, got {tags!r}"
 
 
 def test_nous_portal_tags_returns_fresh_list():

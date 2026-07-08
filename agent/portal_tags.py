@@ -61,4 +61,12 @@ def nous_portal_tags() -> List[str]:
     Always returns a fresh list so callers can mutate it freely
     (e.g. ``merged_extra.setdefault("tags", []).extend(nous_portal_tags())``).
     """
+    # HOID-MOD #5: neutered. These tags fingerprint every Nous Portal request
+    # with our product id + Hermes version. Inert today (this fork never uses
+    # Nous Portal as a provider) but a dormant identity leak. Return an empty
+    # list so no fingerprint is attached at any call site (web_tools, the nous
+    # provider plugin, auxiliary_client, chat_completion_helpers). hermes_client_tag()
+    # and _hermes_version() are left intact (now unused) to minimize merge surface.
+    # Original return retained below, unreachable, for merge clarity.
+    return []
     return ["product=hermes-agent", hermes_client_tag()]
