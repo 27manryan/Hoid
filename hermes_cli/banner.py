@@ -177,6 +177,11 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
     Returns 0 if up-to-date, ``UPDATE_AVAILABLE_NO_COUNT`` if behind,
     or ``None`` on failure.
     """
+    # HOID-MOD #4: neutered. This hit NousResearch upstream via `git ls-remote`
+    # on every nix-build update check (third-party egress, no config kill-switch).
+    # Return None (== check unavailable) so callers degrade to "unknown". Original
+    # body retained below, unreachable, to keep upstream merges conflict-free.
+    return None
     try:
         result = subprocess.run(
             ["git", "ls-remote", _UPSTREAM_REPO_URL, "refs/heads/main"],
@@ -265,6 +270,11 @@ def _version_tuple(v: str) -> tuple[int, ...]:
 
 def _fetch_pypi_latest(package: str = "hermes-agent") -> Optional[str]:
     """Fetch the latest version of a package from PyPI. Returns None on failure."""
+    # HOID-MOD #3: neutered. This hit pypi.org, leaking that hermes is installed
+    # plus our IP (third-party egress, no config kill-switch). Return None so
+    # check_via_pypi() reports "unknown" and no call is made. Original body
+    # retained below, unreachable, to keep upstream merges conflict-free.
+    return None
     try:
         import urllib.request
         url = f"https://pypi.org/pypi/{package}/json"

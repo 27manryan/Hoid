@@ -98,7 +98,13 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
 
 
 def test_check_for_updates_official_ssh_origin_uses_https_probe(tmp_path):
-    """Passive update checks must not trigger SSH auth for official installs."""
+    """Passive update checks must not trigger SSH auth for official installs.
+
+    HOID-MOD #4: `_check_via_rev()` is neutered to always return None (no
+    egress), so this probe path now degrades to "unknown" instead of a real
+    behind-count. The important invariant this test still protects is that
+    no SSH fetch is triggered for official installs; it no longer asserts
+    a live ls-remote answer since that call never fires."""
     import hermes_cli.banner as banner
 
     repo_dir = tmp_path / "hermes-agent"
@@ -125,7 +131,7 @@ def test_check_for_updates_official_ssh_origin_uses_https_probe(tmp_path):
     with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
         result = banner._check_via_local_git(repo_dir)
 
-    assert result == 1
+    assert result is None
     assert ["git", "fetch", "origin", "--quiet"] not in calls
 
 
